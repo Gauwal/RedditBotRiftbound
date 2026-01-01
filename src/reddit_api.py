@@ -1,5 +1,6 @@
 """Reddit API interactions for scanning posts and comments."""
 import logging
+import os
 import re
 from typing import Iterable, Iterator, List, Optional
 
@@ -77,9 +78,16 @@ def reply_with_card_info(thing_fullname: str, message: str) -> None:
 def build_reddit_client(client_id: str, client_secret: str, user_agent: str) -> praw.Reddit:
     """Initialize and store a Reddit API client instance."""
     global _reddit_client
-    _reddit_client = praw.Reddit(
-        client_id=client_id,
-        client_secret=client_secret,
-        user_agent=user_agent,
-    )
+    username = os.environ.get("REDDIT_USERNAME", "").strip()
+    password = os.environ.get("REDDIT_PASSWORD", "").strip()
+    kwargs = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "user_agent": user_agent,
+    }
+    # If present, authenticate (needed to reply/post).
+    if username and password:
+        kwargs.update({"username": username, "password": password})
+
+    _reddit_client = praw.Reddit(**kwargs)
     return _reddit_client

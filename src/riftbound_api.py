@@ -22,19 +22,30 @@ def build_riftbound_client(api_key: Optional[str] = None) -> http.client.HTTPSCo
     return http.client.HTTPSConnection(RIFTBOUND_HOST)
 
 
-def _http_get_json(host: str, path: str, headers: Optional[dict[str, str]] = None) -> tuple[int, Any]:
-    conn = http.client.HTTPSConnection(host)
+def _http_get_json(
+    host: str,
+    path: str,
+    headers: Optional[dict[str, str]] = None,
+    timeout_seconds: int = 10,
+) -> tuple[int, Any]:
+    conn = http.client.HTTPSConnection(host, timeout=timeout_seconds)
     hdrs = {"Accept": "application/json"}
     if headers:
         hdrs.update(headers)
-    conn.request("GET", path, "", hdrs)
-    res = conn.getresponse()
-    raw = res.read()
     try:
-        payload = json.loads(raw.decode("utf-8")) if raw else None
-    except json.JSONDecodeError:
-        payload = raw.decode("utf-8", errors="replace")
-    return res.status, payload
+        conn.request("GET", path, "", hdrs)
+        res = conn.getresponse()
+        raw = res.read()
+        try:
+            payload = json.loads(raw.decode("utf-8")) if raw else None
+        except json.JSONDecodeError:
+            payload = raw.decode("utf-8", errors="replace")
+        return res.status, payload
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _first_card_obj(payload: Any) -> Optional[dict[str, Any]]:
@@ -58,6 +69,12 @@ def _extract_image_url(card: dict[str, Any]) -> Optional[str]:
         value = card.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+
+    media = card.get("media")
+    if isinstance(media, dict):
+        value = media.get("image_url") or media.get("imageUrl")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     images = card.get("images")
     if isinstance(images, dict):
         for key in ("normal", "large", "small", "png", "default"):
@@ -79,29 +96,41 @@ reasonable endpoints and normalizes the result.
 
     encoded = urllib.parse.quote(name)
 
-    # Try a few plausible patterns.
-    candidates = [
-        f"/cards/name?name={encoded}",
-        f"/cards/name/{encoded}",
-        f"/cards/search?name={encoded}",
-        f"/cards?name={encoded}",
-    ]
+    # Documented endpoint:
+    # GET https://api.riftcodex.com/cards/name?fuzzy=...
+    attempts = [f"/cards/name?fuzzy={encoded}"]
     last_payload: Any = None
-    for path in candidates:
+    for path in attempts:
         status, payload = _http_get_json(RIFTBOUND_HOST, path)
         last_payload = payload
-        if status == 200 and payload is not None:
-            card = _first_card_obj(payload)
-            if card is None:
-                continue
-            return {
-                "raw": card,
-                "name": card.get("name") or name,
-                "image_url": _extract_image_url(card),
-                "source": "riftbound",
-            }
+        if status != 200 or payload is None:
+            continue
 
-    # No success; return empty but include last response for debugging.
+        # Schema: { items: [ {...}, ... ], total, page, size, pages }
+        if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+            items = payload.get("items")
+            if items:
+                first = items[0]
+                if isinstance(first, dict):
+                    return {
+                        "raw": first,
+                        "name": first.get("name") or name,
+                        "image_url": _extract_image_url(first),
+                        "source": "riftbound",
+                    }
+            continue
+
+        # Fallback parsing if the API shape differs.
+        card = _first_card_obj(payload)
+        if card is None:
+            continue
+        return {
+            "raw": card,
+            "name": card.get("name") or name,
+            "image_url": _extract_image_url(card),
+            "source": "riftbound",
+        }
+
     if last_payload is not None:
         return {"raw": last_payload, "name": name, "image_url": None, "source": "riftbound"}
     return {}
@@ -149,8 +178,8 @@ an image URL from common fields.
 
 
 def compose_card_reply(card_name: str, image_url: Optional[str], details: Optional[dict]) -> str:
-    """Format a Reddit-friendly reply that includes the card name and image link."""
-    name = (card_name or "").strip() or "(unknown card)"
-    if image_url:
-        return f"{name}\n\nImage: {image_url}"
-    return f"{name}\n\nImage: (not found)"
+    """Format output (for prints/replies).
+
+    Per current bot behavior, this returns only the image URL when found.
+    """
+    return image_url or "(not found)"
